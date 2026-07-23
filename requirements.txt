@@ -1,0 +1,6 @@
+akshare>=1.16
+pandas
+matplotlib
+streamlit>=1.30
+plotly
+python-docx
