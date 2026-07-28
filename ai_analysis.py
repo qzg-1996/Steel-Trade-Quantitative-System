@@ -1,0 +1,108 @@
+# -*- coding: utf-8 -*-
+"""AI 分析模块：调用 Kimi API（Moonshot），实现消息自动解读与辅助筛选
+
+设计要点：
+  - API Key 存本地 ai_config.json（已加入 .gitignore，不会上传GitHub）
+  - 云端部署时在 Streamlit Cloud 后台 Settings -> Secrets 配置 KIMI_API_KEY
+  - 调用失败自动降级，不影响系统其他功能
+"""
+import json
+import os
+
+import requests
+
+from config import BASE_DIR
+
+CONFIG_PATH = os.path.join(BASE_DIR, "ai_config.json")
+DEFAULTS = {"api_key": "", "base_url": "https://api.moonshot.cn/v1",
+            "model": "moonshot-v1-8k"}
+
+SYSTEM_PROMPT = (
+    "你是黑色系大宗商品产业分析师，服务于一家钢贸企业经营管理部。"
+    "基于提供的当日行情数据与财经快讯，输出简洁专业的每日解读。要求：\n"
+    "1. 开头一句话定调：今日消息面对钢材价格整体利多/利空/中性（含强度）；\n"
+    "2. 挑出最重要的3-5条消息逐条点评：影响路径、影响程度（强/中/弱）、"
+    "作用品种（成材/原料/宏观）；\n"
+    "3. 结尾结合基差分位、月差结构给出1-2条操作提示（套保/基差交易视角）；\n"
+    "4. 全文不超过400字，直接给结论，不要客套话，不要重复原文标题。")
+
+
+def load_config():
+    """读取AI配置：优先本地文件，其次Streamlit secrets（云端）"""
+    cfg = dict(DEFAULTS)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            cfg.update(json.load(open(CONFIG_PATH, encoding="utf-8")))
+        except Exception:
+            pass
+    if not cfg["api_key"]:
+        try:
+            import streamlit as st
+            cfg["api_key"] = st.secrets.get("KIMI_API_KEY", "")
+        except Exception:
+            pass
+    return cfg
+
+
+def save_config(api_key, model=None):
+    cfg = load_config()
+    cfg["api_key"] = api_key.strip()
+    if model:
+        cfg["model"] = model
+    json.dump(cfg, open(CONFIG_PATH, "w", encoding="utf-8"),
+              ensure_ascii=False, indent=2)
+
+
+def is_ready():
+    return bool(load_config()["api_key"])
+
+
+def _chat(messages, max_tokens=800, temperature=0.3):
+    """调用Kimi API（OpenAI兼容协议）"""
+    cfg = load_config()
+    if not cfg["api_key"]:
+        raise RuntimeError("未配置API Key")
+    r = requests.post(
+        f"{cfg['base_url'].rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {cfg['api_key']}",
+                 "Content-Type": "application/json"},
+        json={"model": cfg["model"], "messages": messages,
+              "max_tokens": max_tokens, "temperature": temperature},
+        timeout=60)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+
+def daily_interpret(market_snapshot, news_list):
+    """每日AI解读：行情快照 + 消息列表 -> 分析文字"""
+    news_text = "\n".join(
+        f"- [{n['category']}] {n['pub_time'][:16]} {n['title']}"
+        + (f"（{n['summary'][:80]}）" if n["summary"] != n["title"] else "")
+        for n in news_list)
+    user = (f"【当日行情快照】\n{market_snapshot}\n\n"
+            f"【当日相关快讯（已经初步筛选）】\n{news_text or '（今日暂无黑色系相关快讯）'}")
+    return _chat([{"role": "system", "content": SYSTEM_PROMPT},
+                  {"role": "user", "content": user}])
+
+
+def ai_screen_news(raw_news):
+    """AI辅助筛选：从原始快讯中挑出与钢贸/黑色系相关的条目
+    raw_news: [{"idx","title"}...]  返回AI认为相关的idx列表及一句话理由"""
+    items = "\n".join(f"{n['idx']}. {n['title']}" for n in raw_news)
+    prompt = (
+        "以下是今日财经快讯列表。请挑出与钢材、黑色金属、钢铁产业链、"
+        "房地产基建、宏观货币政策直接或间接相关的条目。\n"
+        "输出格式：每行一条「序号|相关理由（10字内）」，不要输出其他内容；"
+        "若全部无关，只输出「无」。\n\n" + items)
+    resp = _chat([{"role": "user", "content": prompt}], max_tokens=500)
+    out = []
+    for line in resp.strip().splitlines():
+        line = line.strip()
+        if not line or line == "无":
+            continue
+        if "|" in line:
+            num, reason = line.split("|", 1)
+            num = "".join(ch for ch in num if ch.isdigit())
+            if num:
+                out.append({"idx": int(num), "reason": reason.strip()})
+    return out

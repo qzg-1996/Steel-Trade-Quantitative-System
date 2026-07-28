@@ -47,7 +47,7 @@ CAT_COLOR = {
 # ---------------- 侧边栏 ----------------
 with st.sidebar:
     st.title("🏗️ 钢贸产业量化系统")
-    st.caption("v0.7 · 产业 + 期货 量化研究平台（云端就绪）")
+    st.caption("v0.8 · 产业 + 期货 量化研究平台（AI增强）")
     page = st.radio("功能导航",
                     ["📊 基差看板", "📈 价差与利润", "🔬 量化研究",
                      "📋 策略输出", "📰 热点消息", "🗄️ 数据管理"])
@@ -426,6 +426,48 @@ elif page == "📋 策略输出":
 elif page == "📰 热点消息":
     st.header("黑色系热点消息")
 
+    # ---- AI 每日解读 ----
+    from ai_analysis import is_ready as _ai_ready, daily_interpret
+    if not _ai_ready():
+        st.info("🤖 AI自动解读：请先到「🗄️ 数据管理」页底部配置 Kimi API Key "
+                "（platform.moonshot.cn 免费申请），配置后此处一键生成每日消息解读。")
+    else:
+        a1, a2 = st.columns([1, 3])
+        with a1:
+            gen_ai = st.button("🤖 生成今日AI解读", use_container_width=True)
+        if gen_ai:
+            from analysis import basis_summary
+            from factors import month_spread, profit_factor
+            from signals import hedge_scorecard
+            snap_parts = []
+            for _s, (_n, _) in SPOT.items():
+                _i = basis_summary(conn, _s)
+                _c = hedge_scorecard(conn, _s, persist=False)
+                if _i and _c:
+                    snap_parts.append(
+                        f"{_n}: 现货{_i['spot']:.0f} 期货{_i['futures']:.0f} "
+                        f"基差{_i['basis']:+.0f}(近一年{_c['basis_pct']}%分位) "
+                        f"信号{_c['icon']}(总分{_c['total']:+d})")
+            _ms = month_spread(conn, "RB")
+            _pf = profit_factor(conn)
+            snap_parts.append(f"螺纹主力月差{_ms['spread'].iloc[-1]:+.0f}元/吨; "
+                              f"盘面毛利{_pf['profit'].iloc[-1]:.0f}元/吨(未扣加工费)")
+            today_news = get_news(conn, days=1, category=None).to_dict("records")
+            with st.spinner("AI分析中（约10-20秒）……"):
+                try:
+                    result = daily_interpret("\n".join(snap_parts), today_news)
+                    st.session_state["ai_result"] = result
+                except Exception as e:
+                    st.error(f"AI调用失败：{e}")
+        if st.session_state.get("ai_result"):
+            st.markdown(
+                f"""<div style="background:rgba(106,61,154,0.10);
+                border-left:4px solid #6A3D9A;border-radius:6px;
+                padding:14px 18px;margin-bottom:12px">
+                <b>🤖 AI每日解读</b><div style="font-size:14px;line-height:1.8;
+                margin-top:6px;white-space:pre-wrap">{st.session_state['ai_result']}</div>
+                </div>""", unsafe_allow_html=True)
+
     # ---- 顶部紧凑工具行 ----
     t1, t2, t3, t4 = st.columns([1.2, 1, 1, 1.2])
     with t1:
@@ -547,3 +589,20 @@ elif page == "🗄️ 数据管理":
     inv = pd.read_sql("SELECT * FROM inventory ORDER BY date DESC LIMIT 10", conn)
     if not inv.empty:
         st.dataframe(inv, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("AI 分析配置（Kimi API）")
+    st.caption("配置后「热点消息」页可一键生成AI每日解读。Key只保存在本地 ai_config.json，"
+               "已在 .gitignore 中排除，不会上传GitHub。云端部署请在 Streamlit Cloud 后台 "
+               "Settings → Secrets 添加 KIMI_API_KEY。")
+    from ai_analysis import load_config, save_config, is_ready
+    _cfg = load_config()
+    st.caption(f"当前状态：{'✅ 已配置' if is_ready() else '❌ 未配置'}")
+    key_input = st.text_input("Kimi API Key", type="password",
+                              placeholder="sk-...（platform.moonshot.cn → API Key管理 申请）")
+    if st.button("保存Key", use_container_width=True):
+        if key_input.strip():
+            save_config(key_input)
+            st.success("已保存，回「热点消息」页生成AI解读试试")
+        else:
+            st.warning("请输入Key")
