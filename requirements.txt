@@ -4,3 +4,5 @@ matplotlib
 streamlit>=1.30
 plotly
 python-docx
+requests
+openpyxl

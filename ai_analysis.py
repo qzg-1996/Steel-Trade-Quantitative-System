@@ -15,7 +15,12 @@ from config import BASE_DIR
 
 CONFIG_PATH = os.path.join(BASE_DIR, "ai_config.json")
 DEFAULTS = {"api_key": "", "base_url": "https://api.moonshot.cn/v1",
-            "model": "moonshot-v1-8k"}
+            "model": "kimi-k3.1-pro"}
+
+# 模型偏好顺序：官方持续下线旧模型（moonshot-v1系已于2026-08-31下线），
+# 404时自动查询账号可用模型，按此顺序挑选，以后模型再换代也不用改代码
+PREFERRED_MODELS = ["kimi-k3.1-pro", "kimi-k3", "kimi-k2.7-code",
+                    "kimi-k2.6", "kimi-k2.5"]
 
 SYSTEM_PROMPT = (
     "你是黑色系大宗商品产业分析师，服务于一家钢贸企业经营管理部。"
@@ -57,20 +62,52 @@ def is_ready():
     return bool(load_config()["api_key"])
 
 
-def _chat(messages, max_tokens=800, temperature=0.3):
-    """调用Kimi API（OpenAI兼容协议）"""
-    cfg = load_config()
-    if not cfg["api_key"]:
-        raise RuntimeError("未配置API Key")
+def _pick_available_model(cfg):
+    """用Key查询账号当前可用模型列表，按偏好顺序挑一个（应对官方模型换代下线）"""
+    r = requests.get(f"{cfg['base_url'].rstrip('/')}/models",
+                     headers={"Authorization": f"Bearer {cfg['api_key']}"},
+                     timeout=30)
+    r.raise_for_status()
+    ids = [m.get("id", "") for m in r.json().get("data", [])]
+    for want in PREFERRED_MODELS:
+        if want in ids:
+            return want
+    for mid in ids:  # 兜底：任意一个kimi系对话模型
+        if mid.startswith("kimi"):
+            return mid
+    raise RuntimeError(f"账号无可用模型，models接口返回：{ids[:5]}")
+
+
+def _post_chat(cfg, model, messages, max_tokens, temperature):
     r = requests.post(
         f"{cfg['base_url'].rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {cfg['api_key']}",
                  "Content-Type": "application/json"},
-        json={"model": cfg["model"], "messages": messages,
+        json={"model": model, "messages": messages,
               "max_tokens": max_tokens, "temperature": temperature},
         timeout=60)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
+
+
+def _chat(messages, max_tokens=800, temperature=0.3):
+    """调用Kimi API（OpenAI兼容协议）；404多为模型已下线，自动换可用模型重试一次"""
+    cfg = load_config()
+    if not cfg["api_key"]:
+        raise RuntimeError("未配置API Key")
+    try:
+        return _post_chat(cfg, cfg["model"], messages, max_tokens, temperature)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            model = _pick_available_model(cfg)
+            cfg["model"] = model
+            try:  # 本地环境顺手写回配置，云端只读文件系统则跳过
+                json.dump(cfg, open(CONFIG_PATH, "w", encoding="utf-8"),
+                          ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            return _post_chat(cfg, model, messages, max_tokens, temperature)
+        raise
 
 
 def daily_interpret(market_snapshot, news_list):

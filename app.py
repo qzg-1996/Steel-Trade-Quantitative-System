@@ -47,9 +47,9 @@ CAT_COLOR = {
 # ---------------- 侧边栏 ----------------
 with st.sidebar:
     st.title("🏗️ 钢贸产业量化系统")
-    st.caption("v0.8 · 产业 + 期货 量化研究平台（AI增强）")
+    st.caption("v0.9 · 产业 + 期货 量化研究平台（AI增强）")
     page = st.radio("功能导航",
-                    ["📊 基差看板", "📈 价差与利润", "🔬 量化研究",
+                    ["📊 基差看板", "📈 价差与利润", "📉 技术分析", "🔬 量化研究",
                      "📋 策略输出", "📰 热点消息", "🗄️ 数据管理"])
     st.divider()
     st.caption("数据：新浪财经 / 生意社 / 东方财富\n仅供研究参考，不构成投资建议")
@@ -201,6 +201,88 @@ elif page == "📈 价差与利润":
                        annotation_text=f"均值 {pf['profit'].mean():.0f}")
         fig2.update_layout(hovermode="x unified", height=400, yaxis_title="元/吨")
         st.plotly_chart(fig2, use_container_width=True)
+
+
+# ================= 页面：技术分析 =================
+elif page == "📉 技术分析":
+    st.header("技术分析（连续合约）")
+    st.caption("基于期货日线自动计算均线 / MACD / RSI / 布林带 / ATR，全部本地计算，不依赖外部接口")
+    from indicators import add_indicators, interpret_technicals
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        tech_sym = st.selectbox("品种", list(FUTURES.keys()),
+                                format_func=lambda s: f"{FUTURES[s]}({s})", key="tech_sym")
+    with c2:
+        tech_days = st.slider("展示天数（交易日）", 60, 500, 250, 10, key="tech_days")
+
+    ohlc = pd.read_sql("SELECT date, open, high, low, close, volume FROM futures_daily "
+                       "WHERE symbol=? ORDER BY date", conn, params=(tech_sym,))
+    if ohlc.empty:
+        st.warning("暂无数据，请先到「数据管理」页更新行情。")
+    else:
+        d = add_indicators(ohlc)
+        show = d.tail(tech_days)
+        last = d.iloc[-1]
+
+        # 顶部指标卡
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("最新收盘", f"{last['close']:.0f}")
+        bias = (last["close"] / last["ma20"] - 1) * 100 if last["ma20"] else 0
+        m2.metric("20日均线乖离", f"{bias:+.1f}%",
+                  delta="偏强" if bias > 0 else "偏弱", delta_color="off")
+        m3.metric("RSI(14)", f"{last['rsi14']:.0f}")
+        macd_state = "多头" if last["dif"] > last["dea"] else "空头"
+        m4.metric("MACD状态", macd_state,
+                  delta=f"DIF {last['dif']:.1f} / DEA {last['dea']:.1f}", delta_color="off")
+        m5.metric("ATR(14)", f"{last['atr14']:.0f} 元",
+                  delta="日真实波幅", delta_color="off")
+
+        # 三合一图：K线+均线+布林 / MACD / RSI
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                            row_heights=[0.55, 0.25, 0.2], vertical_spacing=0.03,
+                            subplot_titles=("K线 · 均线 · 布林带", "MACD(12,26,9)", "RSI(14)"))
+        fig.add_trace(go.Candlestick(x=show["date"], open=show["open"], high=show["high"],
+                                     low=show["low"], close=show["close"], name="K线",
+                                     increasing_line_color="#C00000",
+                                     decreasing_line_color="#2E7D32"), row=1, col=1)
+        for ma, color in (("ma5", "#E6852D"), ("ma20", "#1F4E79"), ("ma60", "#6A3D9A")):
+            fig.add_trace(go.Scatter(x=show["date"], y=show[ma], name=ma.upper(),
+                                     line=dict(color=color, width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=show["date"], y=show["boll_up"], name="布林上轨",
+                                 line=dict(color="#999", width=1, dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=show["date"], y=show["boll_dn"], name="布林下轨",
+                                 line=dict(color="#999", width=1, dash="dot"),
+                                 fill="tonexty", fillcolor="rgba(128,128,128,0.07)"), row=1, col=1)
+        colors = ["#C00000" if v >= 0 else "#2E7D32" for v in show["macd"]]
+        fig.add_trace(go.Bar(x=show["date"], y=show["macd"], name="MACD柱",
+                             marker_color=colors), row=2, col=1)
+        fig.add_trace(go.Scatter(x=show["date"], y=show["dif"], name="DIF",
+                                 line=dict(color="#E6852D", width=1.2)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=show["date"], y=show["dea"], name="DEA",
+                                 line=dict(color="#1F4E79", width=1.2)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=show["date"], y=show["rsi14"], name="RSI",
+                                 line=dict(color="#6A3D9A", width=1.4)), row=3, col=1)
+        for yv, txt in ((80, "超买80"), (20, "超卖20")):
+            fig.add_hline(y=yv, row=3, col=1, line_dash="dash", line_color="#888",
+                          annotation_text=txt)
+        fig.update_layout(height=760, hovermode="x unified", showlegend=True,
+                          legend=dict(orientation="h", y=1.02),
+                          xaxis3_rangeslider_visible=False)
+        fig.update_xaxes(rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 解读
+        st.subheader("🎙️ 解读")
+        for icon, title, content in interpret_technicals(d, FUTURES[tech_sym]):
+            st.markdown(
+                f'<div style="border-left:4px solid #1F4E79;padding:10px 14px;margin:8px 0;'
+                f'background:rgba(128,128,128,0.08);border-radius:0 8px 8px 0">'
+                f'<b>{icon} {title}</b><br>'
+                f'<span style="font-size:13.5px;opacity:0.9">{content}</span></div>',
+                unsafe_allow_html=True)
+        st.caption("技术指标是「市场的体温计」不是「水晶球」：它描述当前状态，不预测未来。"
+                   "请与基差分位、月差结构、套保信号（见「量化研究/策略输出」页）交叉验证。")
 
 
 # ================= 页面3：量化研究 =================
@@ -589,6 +671,70 @@ elif page == "🗄️ 数据管理":
     inv = pd.read_sql("SELECT * FROM inventory ORDER BY date DESC LIMIT 10", conn)
     if not inv.empty:
         st.dataframe(inv, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("外部数据批量导入（Excel / CSV）")
+    st.caption("把 Kimi 从 Wind 取好的数据（或任何 Excel）一次性导入，与手工录入共用同一张库存/产业数据表。"
+               "文件需包含三列：指标、日期、数值（备注列可选）。可向 Kimi 索取《外部数据导入模板.xlsx》。")
+    up_file = st.file_uploader("选择文件", type=["xlsx", "xls", "csv"], key="ext_upload")
+    if up_file is not None:
+        try:
+            if up_file.name.lower().endswith(".csv"):
+                imp = pd.read_csv(up_file)
+            else:
+                imp = pd.read_excel(up_file)
+            col_map = {}
+            for c in imp.columns:
+                cs = str(c).strip()
+                if cs in ("指标", "名称", "指标名称", "name"): col_map[c] = "name"
+                elif cs in ("日期", "数据日期", "时间", "date"): col_map[c] = "date"
+                elif cs in ("数值", "值", "value"): col_map[c] = "value"
+                elif cs in ("备注", "来源", "note"): col_map[c] = "note"
+            imp = imp.rename(columns=col_map)
+            if {"name", "date", "value"} <= set(imp.columns):
+                imp["date"] = pd.to_datetime(imp["date"]).dt.strftime("%Y-%m-%d")
+                if "note" not in imp.columns:
+                    imp["note"] = "外部导入"
+                st.dataframe(imp.head(10), use_container_width=True, hide_index=True)
+                st.caption(f"共 {len(imp)} 行，确认无误后点下方按钮入库（同指标同日期自动覆盖）")
+                if st.button("📥 确认导入", use_container_width=True, key="ext_import_btn"):
+                    n = 0
+                    for _, r in imp.iterrows():
+                        conn.execute("INSERT OR REPLACE INTO inventory VALUES(?,?,?,?)",
+                                     (str(r["name"]), str(r["date"]), float(r["value"]), str(r["note"])))
+                        n += 1
+                    conn.commit()
+                    st.success(f"已导入 {n} 行")
+            else:
+                st.error("未识别到「指标/日期/数值」三列，请检查表头（支持中文或 name/date/value）")
+        except Exception as e:
+            st.error(f"文件读取失败：{e}")
+
+    # 产业数据走势图
+    names = pd.read_sql("SELECT DISTINCT name FROM inventory ORDER BY name", conn)["name"].tolist()
+    if names:
+        st.subheader("产业数据走势")
+        pick = st.selectbox("选择指标", names, key="inv_chart_pick")
+        h = pd.read_sql("SELECT date, value FROM inventory WHERE name=? ORDER BY date",
+                        conn, params=(pick,))
+        if len(h) >= 2:
+            latest_v, prev_v = h["value"].iloc[-1], h["value"].iloc[-2]
+            chg = latest_v - prev_v
+            mm1, mm2, mm3 = st.columns(3)
+            mm1.metric("最新值", f"{latest_v:.2f}", f"{chg:+.2f}")
+            mm2.metric("数据期数", f"{len(h)} 期")
+            mm3.metric("区间", f"{h['date'].iloc[0]} ~ {h['date'].iloc[-1]}")
+            fig_inv = go.Figure()
+            fig_inv.add_trace(go.Scatter(x=h["date"], y=h["value"], name=pick,
+                                         mode="lines+markers",
+                                         line=dict(color="#0B7A75", width=2)))
+            fig_inv.update_layout(hovermode="x unified", height=360, title=pick)
+            st.plotly_chart(fig_inv, use_container_width=True)
+            if len(h) >= 8:
+                st.caption("💡 数据攒到8期以上后，这些曲线就可以升级成「库存因子」进入信号记分卡——"
+                           "到时候叫 Kimi 帮你接入。")
+        else:
+            st.caption("该指标数据不足2期，继续累积。")
 
     st.divider()
     st.subheader("AI 分析配置（Kimi API）")
