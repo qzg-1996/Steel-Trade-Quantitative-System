@@ -78,25 +78,38 @@ def _pick_available_model(cfg):
     raise RuntimeError(f"账号无可用模型，models接口返回：{ids[:5]}")
 
 
-def _post_chat(cfg, model, messages, max_tokens, temperature):
+def _post_chat(cfg, model, messages, max_tokens):
+    # K3系列模型：temperature/top_p等采样参数被服务端锁死（固定1.0/0.95），
+    # 传了直接400报错，所以一律不传；max_tokens已弃用，改用max_completion_tokens
+    payload = {"model": model, "messages": messages,
+               "max_completion_tokens": max_tokens}
+    if model.startswith("kimi-k3"):
+        # K3支持reasoning_effort（low/high/max，默认max）。每日解读/筛选是小任务，
+        # 用low档：出结果更快、reasoning token消耗更少（思考token也计费）
+        payload["reasoning_effort"] = "low"
     r = requests.post(
         f"{cfg['base_url'].rstrip('/')}/chat/completions",
         headers={"Authorization": f"Bearer {cfg['api_key']}",
                  "Content-Type": "application/json"},
-        json={"model": model, "messages": messages,
-              "max_tokens": max_tokens, "temperature": temperature},
-        timeout=60)
-    r.raise_for_status()
+        json=payload,
+        timeout=90)
+    if r.status_code == 404:
+        # 模型不存在/已下线：抛HTTPError让上层走自动换模型逻辑
+        raise requests.HTTPError("404 Not Found", response=r)
+    if r.status_code != 200:
+        # 把服务端返回的错误原文抛出来，便于排查（截图即可定位）
+        raise RuntimeError(f"AI调用失败 {r.status_code}：{r.text[:300]}")
     return r.json()["choices"][0]["message"]["content"]
 
 
 def _chat(messages, max_tokens=800, temperature=0.3):
-    """调用Kimi API（OpenAI兼容协议）；404多为模型已下线，自动换可用模型重试一次"""
+    """调用Kimi API（OpenAI兼容协议）；404多为模型已下线，自动换可用模型重试一次
+    temperature参数保留兼容但不再发送（新模型锁死采样参数）"""
     cfg = load_config()
     if not cfg["api_key"]:
         raise RuntimeError("未配置API Key")
     try:
-        return _post_chat(cfg, cfg["model"], messages, max_tokens, temperature)
+        return _post_chat(cfg, cfg["model"], messages, max_tokens)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
             model = _pick_available_model(cfg)
@@ -106,7 +119,7 @@ def _chat(messages, max_tokens=800, temperature=0.3):
                           ensure_ascii=False, indent=2)
             except Exception:
                 pass
-            return _post_chat(cfg, model, messages, max_tokens, temperature)
+            return _post_chat(cfg, model, messages, max_tokens)
         raise
 
 
